@@ -5,19 +5,57 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.fraud_pipeline import resolve_target, train_and_evaluate, save_artifacts
+
 st.set_page_config(page_title="Financial Fraud Detection", page_icon="🛡️", layout="wide")
 st.title("🛡️ Financial Fraud Detection Dashboard")
 st.caption("Machine-learning transaction risk analysis | Educational portfolio project")
 
 MODEL_PATH = Path("models/fraud_detection_pipeline.joblib")
 
-@st.cache_resource
-def load_bundle():
-    return joblib.load(MODEL_PATH) if MODEL_PATH.exists() else None
+# Load a saved model once per Streamlit session.
+if "fraud_bundle" not in st.session_state:
+    st.session_state.fraud_bundle = (
+        joblib.load(MODEL_PATH) if MODEL_PATH.exists() else None
+    )
 
-bundle = load_bundle()
+bundle = st.session_state.fraud_bundle
+
 if bundle is None:
-    st.warning("No trained model found. Train it first using the command in the README.")
+    st.info("The dashboard is ready. Upload a labelled transaction dataset below to train your first model.")
+    st.subheader("Step 1 — Upload training data")
+    training_file = st.file_uploader(
+        "Choose your labelled transaction CSV",
+        type=["csv"],
+        key="training_csv",
+        help="Your CSV must contain a binary fraud target column such as isFraud or isFraud1."
+    )
+    if training_file is None:
+        st.markdown(
+            "**Required target format:** 0 = legitimate transaction, 1 = fraudulent transaction. "
+            "The dataset must contain examples of both classes."
+        )
+        st.stop()
+
+    try:
+        training_df = pd.read_csv(training_file)
+        st.write(f"Dataset loaded: **{len(training_df):,} rows** and **{len(training_df.columns):,} columns**.")
+        suggested = next((c for c in ("isFraud", "isFraud1") if c in training_df.columns), None)
+        target_options = list(training_df.columns)
+        default_index = target_options.index(suggested) if suggested else 0
+        target_col = st.selectbox("Select the fraud target column", target_options, index=default_index)
+        st.dataframe(training_df.head(8), use_container_width=True)
+
+        if st.button("Train fraud detection model", type="primary"):
+            with st.spinner("Training and evaluating Logistic Regression and Random Forest..."):
+                result = train_and_evaluate(training_df, target_col)
+                save_artifacts(result)
+                st.session_state.fraud_bundle = joblib.load(MODEL_PATH)
+                st.session_state.training_metrics = result["metrics"]
+            st.success(f"Training complete. Best model: {result['model_name']}")
+            st.rerun()
+    except Exception as exc:
+        st.error(f"Could not read or train from this dataset: {exc}")
     st.stop()
 
 model = bundle["model"]
@@ -25,10 +63,23 @@ features = bundle["feature_columns"]
 st.sidebar.header("Prediction settings")
 threshold = st.sidebar.slider("Fraud alert threshold", 0.05, 0.95, 0.50, 0.05)
 st.sidebar.write("Selected model:", bundle["model_name"])
+if st.sidebar.button("Train a different model"):
+    st.session_state.fraud_bundle = None
+    st.rerun()
 
 overview, batch, single = st.tabs(["Overview", "Batch prediction", "Single transaction"])
 
 with overview:
+    metrics = st.session_state.get("training_metrics")
+    if metrics:
+        st.subheader("Model evaluation")
+        metric_cols = st.columns(4)
+        best = bundle["model_name"]
+        for col, metric, label in zip(
+            metric_cols, ("precision", "recall", "f1_score", "roc_auc"),
+            ("Precision", "Recall", "F1-score", "ROC-AUC")
+        ):
+            col.metric(label, f"{metrics[best][metric]:.3f}")
     file = st.file_uploader("Upload a transaction CSV for overview", type=["csv"], key="overview")
     if file:
         df = pd.read_csv(file)
@@ -72,25 +123,34 @@ with batch:
                                          title="Predicted fraud probability"), use_container_width=True)
 
 with single:
-    st.write("Enter feature values for one transaction. This form uses generic inputs; for best results, provide values in the same format as your training data.")
+    st.write("Enter feature values for one transaction. For categorical fields, enter the same type of value used in your training data.")
     with st.form("single_transaction"):
         values = {}
         cols = st.columns(2)
         for i, feature in enumerate(features):
             with cols[i % 2]:
-                values[feature] = st.text_input(feature, "") if feature in ("type", "Acct type", "Time of day", "branch") else st.number_input(feature, value=0.0)
+                if feature in ("type", "Acct type", "Time of day", "branch"):
+                    values[feature] = st.text_input(feature, "")
+                else:
+                    values[feature] = st.number_input(feature, value=0.0)
         submitted = st.form_submit_button("Analyse transaction")
     if submitted:
         row = pd.DataFrame([values], columns=features)
         for col in row.columns:
             if row[col].dtype == object:
                 row[col] = row[col].replace("", np.nan)
-        probability = float(model.predict_proba(row)[0, 1])
-        flagged = probability >= threshold
-        a, b = st.columns(2)
-        a.metric("Fraud probability", f"{probability:.2%}")
-        b.metric("Prediction", "Flag for review" if flagged else "Below threshold")
-        st.warning("A model flag is a risk indicator, not proof of fraud.") if flagged else st.info("A low score does not guarantee that the transaction is legitimate.")
+        try:
+            probability = float(model.predict_proba(row)[0, 1])
+            flagged = probability >= threshold
+            a, b = st.columns(2)
+            a.metric("Fraud probability", f"{probability:.2%}")
+            b.metric("Prediction", "Flag for review" if flagged else "Below threshold")
+            if flagged:
+                st.warning("A model flag is a risk indicator, not proof of fraud.")
+            else:
+                st.info("A low score does not guarantee that the transaction is legitimate.")
+        except Exception as exc:
+            st.error(f"Could not score this transaction. Check that all inputs match the training data. Details: {exc}")
 
 st.divider()
 st.caption("Educational use only. Do not use model outputs as the sole basis for financial decisions.")
