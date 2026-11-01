@@ -16,22 +16,55 @@ from sklearn.metrics import (
     roc_auc_score, confusion_matrix, classification_report
 )
 
+POSITIVE_LABELS = {"1", "true", "yes", "y", "fraud", "fraudulent", "suspicious", "positive"}
+NEGATIVE_LABELS = {"0", "false", "no", "n", "legitimate", "genuine", "normal", "non-fraud", "nonfraud", "negative"}
+
 def resolve_target(df, requested=None):
     if requested:
         if requested not in df.columns:
             raise ValueError(f"Target '{requested}' not found. Columns: {list(df.columns)}")
         return requested
-    for col in ("isFraud", "isFraud1"):
+    for col in ("isFraud", "isFraud1", "is_fraud", "fraud", "fraud_status", "is_fraudulent"):
         if col in df.columns:
             return col
-    raise ValueError("Target not found. Expected isFraud or isFraud1; alternatively pass --target.")
+    raise ValueError(
+        "No obvious fraud-label column was found. Your dataset must include a column "
+        "that tells whether each transaction is fraudulent or legitimate."
+    )
 
-def prepare_features(df, target):
-    y = pd.to_numeric(df[target], errors="coerce")
-    if y.isna().any() or not set(y.unique()).issubset({0, 1}):
-        raise ValueError("Target must contain only non-missing binary values: 0 and 1.")
+def prepare_features(df, target, positive_label=None):
+    raw = df[target]
+    if raw.isna().any():
+        raise ValueError("The selected target column contains missing values. Remove or label those rows first.")
+    unique_values = list(pd.unique(raw))
+    if len(unique_values) != 2:
+        preview = unique_values[:10]
+        raise ValueError(
+            f"Selected target '{target}' has {len(unique_values)} distinct values ({preview}). "
+            "Choose a binary fraud-status column with exactly two classes."
+        )
+
+    if positive_label is not None:
+        positive_text = str(positive_label).strip().casefold()
+        y = raw.astype(str).str.strip().str.casefold().eq(positive_text).astype(int)
+    else:
+        normalized = {str(v).strip().casefold(): v for v in unique_values}
+        positive_matches = [k for k in normalized if k in POSITIVE_LABELS]
+        negative_matches = [k for k in normalized if k in NEGATIVE_LABELS]
+        if len(positive_matches) == 1 and len(negative_matches) == 1:
+            y = raw.astype(str).str.strip().str.casefold().eq(positive_matches[0]).astype(int)
+        else:
+            numeric = pd.to_numeric(raw, errors="coerce")
+            if numeric.notna().all() and set(numeric.unique()) == {0, 1}:
+                y = numeric.astype(int)
+            else:
+                raise ValueError(
+                    f"Target values are {unique_values}. Select which value means FRAUD in the training screen. "
+                    "Do not choose transaction type, city, device, merchant category, or transaction ID as the target."
+                )
+
     if y.nunique() != 2:
-        raise ValueError("Training requires both classes: 0 (non-fraud) and 1 (fraud).")
+        raise ValueError("Training requires examples of both classes: fraud and non-fraud.")
     X = df.drop(columns=[target]).copy()
     X = X.drop(columns=[c for c in ("nameOrig", "nameDest", "transaction_id", "id") if c in X.columns])
     X = X.loc[:, ~X.columns.duplicated()]
@@ -57,11 +90,12 @@ def build_preprocessor(X):
         ]), categorical))
     return ColumnTransformer(transformers=transformers)
 
-def train_and_evaluate(df, target, random_state=42):
-    X, y = prepare_features(df, target)
-    stratify = y if y.value_counts().min() >= 2 else None
+def train_and_evaluate(df, target, random_state=42, positive_label=None):
+    X, y = prepare_features(df, target, positive_label=positive_label)
+    if y.value_counts().min() < 2:
+        raise ValueError("Each class needs at least two rows for a train/test split. Add more labelled examples.")
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=random_state, stratify=stratify
+        X, y, test_size=0.2, random_state=random_state, stratify=y
     )
     estimators = {
         "Logistic Regression": LogisticRegression(
