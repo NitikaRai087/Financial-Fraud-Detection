@@ -64,6 +64,8 @@ streamlit run app.py
 ```
 Open the local URL shown in the terminal, usually http://localhost:8501.
 
+**You can now train directly inside the dashboard:** if no saved model exists, the app displays a training-data uploader. Upload your labelled transaction CSV, select the target column (usually `isFraud` or `isFraud1`), and click **Train fraud detection model**. The app compares Logistic Regression and Random Forest, saves the selected pipeline locally, and opens the dashboard. You can also train from the terminal using the command above.
+
 ## Evaluation
 Fraud data is commonly imbalanced, so accuracy alone is insufficient. Review precision, recall, F1-score, ROC-AUC and the confusion matrix. A lower alert threshold may detect more fraud but can increase false positives.
 
